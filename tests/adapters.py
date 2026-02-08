@@ -700,7 +700,7 @@ def run_train_bpe(
         while True:
             pairs = get_stats(corpus_dict) 
             # 得到下次要合并的候选序列
-            best = max(pairs, key=pairs.get)
+            best = max(pairs, key=lambda k: (pairs[k], *k))
             # 选出频次最高的序列
             # if pairs[best] < 2:
             #     break
