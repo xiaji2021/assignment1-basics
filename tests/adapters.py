@@ -8,7 +8,10 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+import regex as re
 
+from collections import Counter
+import collections
 
 def run_linear(
     d_in: int,
@@ -562,6 +565,53 @@ def get_tokenizer(
     raise NotImplementedError
 
 
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -589,4 +639,82 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    with open(input_path, "rb") as f:
+        num_processes = 4
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+
+        # The following is a serial implementation, but you can parallelize this
+        # by sending each start/end pair to a set of processes.
+        words_freq = Counter()
+
+        vocab = {i: bytes([i]) for i in range(256)}
+        l_letter = len(vocab)
+        for i, special_token in enumerate(special_tokens):
+            byt = special_token.encode("utf-8")
+            vocab[l_letter+i] = byt
+
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            f.seek(start)
+            chunk = f.read(end - start).decode("utf-8", errors="ignore")
+            # 解码后是一个字符串
+            remove_tokens = "|".join(map(re.escape, special_tokens))
+            # 这里需要使用re.escape，防止出现|在special token里的情况
+            texts = re.split(remove_tokens, chunk)
+            # texts is a list of all texts
+            PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+            
+            for text in texts:
+                words_freq.update(m.group() for m in re.finditer(PAT, text))
+                #。这里要加lstrip()
+                    # be like: {'low': 2, 'lower': 1, 'lowest': 1}
+            
+        def add_space(word: str):
+            if " " in word:
+                pass
+            word = word.replace(" ", "Ġ") # 注意replace不是一个原地操作
+            return " ".join(list(word))
+
+        corpus_dict = {add_space(word): freq for word, freq in words_freq.items()}
+        # be like: {'l o w': 2, 'l o w e r': 1, 'l o w e s t': 1}
+        def get_stats(corpus_dict): 
+            pairs = collections.defaultdict(int) 
+            for word, freq in corpus_dict.items():
+                symbols = word.split()
+                for i in range(len(symbols)-1):
+                    
+                    pairs[(symbols[i], symbols[i+1])] += freq
+            return pairs
+        
+        def merge_vocab(pair, v_in):
+            v_out = {}
+            bigram = re.escape(" ".join(pair))
+            p = re.compile(r'(?<!\S)' + bigram + r'(?!\S)')
+            for word in v_in:
+                w_out = p.sub(''.join(pair), word)
+                v_out[w_out] = v_in[word]
+            
+            return v_out
+
+        merges = []
+
+        while True:
+            pairs = get_stats(corpus_dict) 
+            # 得到下次要合并的候选序列
+            best = max(pairs, key=pairs.get)
+            # 选出频次最高的序列
+            # if pairs[best] < 2:
+            #     break
+
+            corpus_dict = merge_vocab(best, corpus_dict)
+            # 得到下次要get_stat的新语料库
+            
+            best = [best[i].replace("Ġ", " ") for i in range(2) ]
+            
+            vocab[len(vocab.keys())] = ''.join(best).encode("utf-8")
+            # if "Ġ" in best:
+            merges.append((best[0].encode('utf-8'), best[1].encode('utf-8'))) 
+            if len(vocab) >= vocab_size:
+                break
+            
+
+    return vocab, merges

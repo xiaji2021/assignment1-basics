@@ -49,8 +49,10 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
+train_data_path = "assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+
 ## Usage
-with open(..., "rb") as f:
+with open(train_data_path, "rb") as f:
     num_processes = 4
     boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
