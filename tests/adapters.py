@@ -700,7 +700,12 @@ def run_train_bpe(
         while True:
             pairs = get_stats(corpus_dict) 
             # 得到下次要合并的候选序列
-            best = max(pairs, key=lambda k: (pairs[k], *k))
+            def key_select(dict_key):
+                k = [dict_key[i].replace("Ġ", " ") for i in range(2)]
+                return k
+            
+
+            best = max(pairs, key=lambda k: (pairs[k], *key_select(k)))
             # 选出频次最高的序列
             # if pairs[best] < 2:
             #     break
